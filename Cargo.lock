@@ -2820,7 +2820,7 @@ checksum = "e8cf8e6a8aa66ce33f63993ffc4ea4271eb5b0530a9002db8455ea6050c77bfa"
 
 [[package]]
 name = "primer_align"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "bio",
  "eframe",

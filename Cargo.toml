@@ -1,8 +1,8 @@
 [package]
 name = "primer_align"
-version = "1.0.0"
+version = "2.0.0"
 edition = "2021"
-description = "qPCR Primer Inclusivity Analysis Tool - A fast Rust implementation"
+description = "qPCR Primer/Probe Inclusivity Analysis Tool - Categorized primer & probe analysis with amplicon detection"
 license = "MIT"
 
 [dependencies]
