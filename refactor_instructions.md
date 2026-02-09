@@ -34,7 +34,7 @@ Keep "Run analysis". Have this in red while there is not at least one forward an
 
 ## Analysis method
 
-Currently, all oligo sequences are treated the same. The program searches for possible amplificates within a certain length range and then performs the aligment for assembling the different patterns.
+Currently, all oligo sequences are treated the same. The program searches for possible amplicons within a certain length range and then performs the aligment for assembling the different patterns.
 
 Change this to the following:
 
@@ -44,3 +44,14 @@ Change this to the following:
 
 *--> Intention behind these changes:
 The idea is that for a given qPCR assay, only one well matching forward primer, reverse primer and probe are needed to generate robust signals. The tool has to be able to show if at least one such combination exists for any given sequence variation. Variations where there are no combinations without missmatches or no combinations without substantial numbers of missmatches, these are an inclusivity concern for the assay* 
+
+## Output
+
+The current implementation of the output is already well suited for purpose. Keep the presentation mostly the same but harmonize with the altered analysis method. The excel-file is the most important output. 
+
+For the output, organize the oligos in the following sequence: (left to right) 
+1. Forward primers
+2. Probes
+3. Reverse primers
+
+Clearly indicate where one section ends and where the other starts. Within category, sort them by input sequence
