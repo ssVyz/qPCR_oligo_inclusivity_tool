@@ -150,6 +150,7 @@ struct AlignmentSettings {
     min_rev_matched: usize,
     min_probe_matched: usize,
     min_coverage: f64,
+    max_mismatches_per_oligo: usize,
     ambiguity_display: AmbiguityDisplayMode,
     min_amplicon_size: Option<usize>,
     max_amplicon_size: Option<usize>,
@@ -167,6 +168,7 @@ impl Default for AlignmentSettings {
             min_rev_matched: 1,
             min_probe_matched: 0,
             min_coverage: 0.8,
+            max_mismatches_per_oligo: 7,
             ambiguity_display: AmbiguityDisplayMode::ShowDots,
             min_amplicon_size: None,
             max_amplicon_size: None,
@@ -197,6 +199,21 @@ struct SequenceResult {
     probe_matched: usize,
     total_mismatches: usize,
     amplicon_info: Option<AmpliconInfo>,
+    /// Best (minimum) mismatch count among matched fwd primers, None if no match
+    best_fwd_mm: Option<usize>,
+    /// Best (minimum) mismatch count among matched rev primers, None if no match
+    best_rev_mm: Option<usize>,
+    /// Best (minimum) mismatch count among matched probes, None if no match
+    best_probe_mm: Option<usize>,
+}
+
+/// Per-category mismatch distribution counts
+#[derive(Clone, Debug, Default)]
+struct MismatchDistribution {
+    zero_mm: usize,   // best oligo in category has 0 mismatches
+    one_mm: usize,    // best oligo in category has exactly 1 mismatch
+    more_mm: usize,   // best oligo in category has >1 mismatches
+    no_match: usize,  // no oligo matched in this category
 }
 
 /// Analysis results
@@ -208,6 +225,9 @@ struct AnalysisResults {
     sequences_with_min_matches: usize,
     sequences_with_valid_amplicon: usize,
     sequences_failed_amplicon: usize,
+    fwd_mm_dist: MismatchDistribution,
+    rev_mm_dist: MismatchDistribution,
+    probe_mm_dist: MismatchDistribution,
     output_text: String,
 }
 
@@ -583,6 +603,7 @@ fn generate_signature(
 }
 
 /// Align a set of oligos against a target sequence, returning results map
+/// Oligos exceeding max_mismatches_per_oligo are discarded as NO_MATCH
 fn align_oligos(
     sequence: &FastaRecord,
     oligos: &[Oligo],
@@ -604,17 +625,23 @@ fn align_oligos(
                         orientation,
                         settings.ambiguity_display,
                     );
-                    let coverage = get_alignment_coverage(&alignment, actual_oligo.len());
 
-                    OligoResult {
-                        matched: true,
-                        orientation: Some(orientation),
-                        signature,
-                        mismatches,
-                        score: alignment.score,
-                        coverage,
-                        start_pos: Some(alignment.xstart),
-                        end_pos: Some(alignment.xend),
+                    // Discard if mismatches exceed threshold
+                    if mismatches > settings.max_mismatches_per_oligo {
+                        OligoResult::no_match()
+                    } else {
+                        let coverage = get_alignment_coverage(&alignment, actual_oligo.len());
+
+                        OligoResult {
+                            matched: true,
+                            orientation: Some(orientation),
+                            signature,
+                            mismatches,
+                            score: alignment.score,
+                            coverage,
+                            start_pos: Some(alignment.xstart),
+                            end_pos: Some(alignment.xend),
+                        }
                     }
                 } else {
                     OligoResult::no_match()
@@ -630,92 +657,105 @@ fn align_oligos(
 }
 
 /// Find the best amplicon from forward and reverse primer results.
-/// Returns AmpliconInfo and filters probe results to only include probes within the amplicon.
+/// Selects the largest convergent fwd+rev pair within size constraints.
+/// Filters ALL oligo categories: only matches within the amplicon bounds are kept.
 fn find_best_amplicon(
-    fwd_results: &HashMap<String, OligoResult>,
-    rev_results: &HashMap<String, OligoResult>,
+    fwd_results: &mut HashMap<String, OligoResult>,
+    rev_results: &mut HashMap<String, OligoResult>,
     probe_results: &mut HashMap<String, OligoResult>,
     min_size: Option<usize>,
     max_size: Option<usize>,
 ) -> AmpliconInfo {
     // Collect matched forward primers with positions
-    let forward_hits: Vec<(String, usize, usize, usize)> = fwd_results
+    let forward_hits: Vec<(String, usize, usize)> = fwd_results
         .iter()
         .filter(|(_, r)| r.matched)
         .filter_map(|(id, r)| match (r.start_pos, r.end_pos) {
-            (Some(s), Some(e)) => Some((id.clone(), s, e, r.mismatches)),
+            (Some(s), Some(e)) => Some((id.clone(), s, e)),
             _ => None,
         })
         .collect();
 
     // Collect matched reverse primers with positions
-    let reverse_hits: Vec<(String, usize, usize, usize)> = rev_results
+    let reverse_hits: Vec<(String, usize, usize)> = rev_results
         .iter()
         .filter(|(_, r)| r.matched)
         .filter_map(|(id, r)| match (r.start_pos, r.end_pos) {
-            (Some(s), Some(e)) => Some((id.clone(), s, e, r.mismatches)),
+            (Some(s), Some(e)) => Some((id.clone(), s, e)),
             _ => None,
         })
         .collect();
 
-    // Find all valid convergent pairs
-    // A convergent pair has: forward start < reverse end (they face each other)
-    let mut valid_amplicons: Vec<(String, String, usize, usize, usize, usize)> = Vec::new();
+    // Find all convergent pairs within size constraints
+    // Convergent: forward start < reverse end (primers face each other)
+    let mut valid_amplicons: Vec<(String, String, usize, usize, usize)> = Vec::new();
 
-    for (fwd_id, fwd_start, _fwd_end, fwd_mm) in &forward_hits {
-        for (rev_id, _rev_start, rev_end, rev_mm) in &reverse_hits {
+    for (fwd_id, fwd_start, _fwd_end) in &forward_hits {
+        for (rev_id, _rev_start, rev_end) in &reverse_hits {
             if fwd_start < rev_end {
                 let amplicon_size = rev_end - fwd_start + 1;
-                let size_valid = match (min_size, max_size) {
+                let size_ok = match (min_size, max_size) {
                     (Some(min), Some(max)) => amplicon_size >= min && amplicon_size <= max,
                     (Some(min), None) => amplicon_size >= min,
                     (None, Some(max)) => amplicon_size <= max,
                     (None, None) => true,
                 };
-                if size_valid {
-                    let total_mm = fwd_mm + rev_mm;
+                if size_ok {
                     valid_amplicons.push((
                         fwd_id.clone(),
                         rev_id.clone(),
                         *fwd_start,
                         *rev_end,
                         amplicon_size,
-                        total_mm,
                     ));
                 }
             }
         }
     }
 
-    if valid_amplicons.is_empty() {
-        // No valid amplicon: mark all probes as no match
-        for result in probe_results.values_mut() {
+    // Helper: mark all results in a map as no_match
+    let mark_all_no_match = |results: &mut HashMap<String, OligoResult>| {
+        for result in results.values_mut() {
             *result = OligoResult::no_match();
         }
+    };
+
+    if valid_amplicons.is_empty() {
+        // No valid amplicon: ALL categories become no_match
+        mark_all_no_match(fwd_results);
+        mark_all_no_match(rev_results);
+        mark_all_no_match(probe_results);
         return AmpliconInfo::default();
     }
 
-    // Select best amplicon: fewest total mismatches, then largest size as tiebreaker
-    let best_amplicon = valid_amplicons
+    // Select the LARGEST valid amplicon
+    let best = valid_amplicons
         .iter()
-        .min_by(|a, b| a.5.cmp(&b.5).then(b.4.cmp(&a.4)))
-        .unwrap();
+        .max_by_key(|a| a.4)
+        .unwrap()
+        .clone();
 
-    let (best_fwd_id, best_rev_id, amp_start, amp_end, amp_size, _) = best_amplicon.clone();
+    let (best_fwd_id, best_rev_id, amp_start, amp_end, amp_size) = best;
 
-    // Filter probes: must be entirely within amplicon boundaries
-    for (_oligo_id, result) in probe_results.iter_mut() {
-        if !result.matched {
-            continue;
-        }
-        if let (Some(start), Some(end)) = (result.start_pos, result.end_pos) {
-            if start < amp_start || end > amp_end {
+    // Filter all categories: only matches entirely within [amp_start, amp_end] are kept
+    let filter_by_bounds = |results: &mut HashMap<String, OligoResult>| {
+        for result in results.values_mut() {
+            if !result.matched {
+                continue;
+            }
+            if let (Some(start), Some(end)) = (result.start_pos, result.end_pos) {
+                if start < amp_start || end > amp_end {
+                    *result = OligoResult::no_match();
+                }
+            } else {
                 *result = OligoResult::no_match();
             }
-        } else {
-            *result = OligoResult::no_match();
         }
-    }
+    };
+
+    filter_by_bounds(fwd_results);
+    filter_by_bounds(rev_results);
+    filter_by_bounds(probe_results);
 
     AmpliconInfo {
         found: true,
@@ -736,31 +776,35 @@ fn analyze_sequence(
     settings: &AlignmentSettings,
 ) -> SequenceResult {
     // Align forward and reverse primers
-    let fwd_results = align_oligos(sequence, fwd_primers, settings);
-    let rev_results = align_oligos(sequence, rev_primers, settings);
+    let mut fwd_results = align_oligos(sequence, fwd_primers, settings);
+    let mut rev_results = align_oligos(sequence, rev_primers, settings);
 
-    // Find best amplicon from fwd+rev results
-    // Probes are only aligned if we have a valid amplicon
+    // Probes are only aligned if we have at least one fwd and rev match
     let mut probe_results: HashMap<String, OligoResult> = HashMap::new();
     let amplicon_info;
 
-    // Check if any fwd and rev primers matched
     let has_fwd_match = fwd_results.values().any(|r| r.matched);
     let has_rev_match = rev_results.values().any(|r| r.matched);
 
     if has_fwd_match && has_rev_match {
-        // Align probes first, then filter by amplicon
+        // Align probes, then find amplicon and filter ALL categories by its bounds
         probe_results = align_oligos(sequence, probes, settings);
 
         amplicon_info = Some(find_best_amplicon(
-            &fwd_results,
-            &rev_results,
+            &mut fwd_results,
+            &mut rev_results,
             &mut probe_results,
             settings.min_amplicon_size,
             settings.max_amplicon_size,
         ));
     } else {
-        // No valid amplicon possible - all probes are NO_MATCH
+        // No valid amplicon possible - ALL categories become NO_MATCH
+        for result in fwd_results.values_mut() {
+            *result = OligoResult::no_match();
+        }
+        for result in rev_results.values_mut() {
+            *result = OligoResult::no_match();
+        }
         for probe in probes {
             probe_results.insert(probe.id.clone(), OligoResult::no_match());
         }
@@ -781,6 +825,11 @@ fn analyze_sequence(
         .map(|r| r.mismatches)
         .sum();
 
+    // Best (minimum) mismatch count per category
+    let best_fwd_mm = fwd_results.values().filter(|r| r.matched).map(|r| r.mismatches).min();
+    let best_rev_mm = rev_results.values().filter(|r| r.matched).map(|r| r.mismatches).min();
+    let best_probe_mm = probe_results.values().filter(|r| r.matched).map(|r| r.mismatches).min();
+
     SequenceResult {
         fwd_results,
         rev_results,
@@ -790,6 +839,9 @@ fn analyze_sequence(
         probe_matched,
         total_mismatches,
         amplicon_info,
+        best_fwd_mm,
+        best_rev_mm,
+        best_probe_mm,
     }
 }
 
@@ -845,6 +897,20 @@ fn run_analysis(
     let sequences_with_valid_amplicon = Arc::new(AtomicUsize::new(0));
     let sequences_failed_amplicon = Arc::new(AtomicUsize::new(0));
 
+    // Mismatch distribution counters per category
+    let fwd_mm_zero = Arc::new(AtomicUsize::new(0));
+    let fwd_mm_one = Arc::new(AtomicUsize::new(0));
+    let fwd_mm_more = Arc::new(AtomicUsize::new(0));
+    let fwd_mm_none = Arc::new(AtomicUsize::new(0));
+    let rev_mm_zero = Arc::new(AtomicUsize::new(0));
+    let rev_mm_one = Arc::new(AtomicUsize::new(0));
+    let rev_mm_more = Arc::new(AtomicUsize::new(0));
+    let rev_mm_none = Arc::new(AtomicUsize::new(0));
+    let probe_mm_zero = Arc::new(AtomicUsize::new(0));
+    let probe_mm_one = Arc::new(AtomicUsize::new(0));
+    let probe_mm_more = Arc::new(AtomicUsize::new(0));
+    let probe_mm_none = Arc::new(AtomicUsize::new(0));
+
     let processed = Arc::new(AtomicUsize::new(0));
 
     sequences.par_iter().for_each(|record| {
@@ -860,6 +926,28 @@ fn run_analysis(
                 sequences_with_valid_amplicon.fetch_add(1, Ordering::SeqCst);
             } else {
                 sequences_failed_amplicon.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        // Track per-category mismatch distributions (best oligo per category)
+        match seq_result.best_fwd_mm {
+            Some(0) => { fwd_mm_zero.fetch_add(1, Ordering::SeqCst); }
+            Some(1) => { fwd_mm_one.fetch_add(1, Ordering::SeqCst); }
+            Some(_) => { fwd_mm_more.fetch_add(1, Ordering::SeqCst); }
+            None => { fwd_mm_none.fetch_add(1, Ordering::SeqCst); }
+        }
+        match seq_result.best_rev_mm {
+            Some(0) => { rev_mm_zero.fetch_add(1, Ordering::SeqCst); }
+            Some(1) => { rev_mm_one.fetch_add(1, Ordering::SeqCst); }
+            Some(_) => { rev_mm_more.fetch_add(1, Ordering::SeqCst); }
+            None => { rev_mm_none.fetch_add(1, Ordering::SeqCst); }
+        }
+        if !probes.is_empty() {
+            match seq_result.best_probe_mm {
+                Some(0) => { probe_mm_zero.fetch_add(1, Ordering::SeqCst); }
+                Some(1) => { probe_mm_one.fetch_add(1, Ordering::SeqCst); }
+                Some(_) => { probe_mm_more.fetch_add(1, Ordering::SeqCst); }
+                None => { probe_mm_none.fetch_add(1, Ordering::SeqCst); }
             }
         }
 
@@ -925,8 +1013,9 @@ fn run_analysis(
                 if entry.examples.len() < 10 {
                     entry.examples.push(record.id.clone());
                 }
+                // Always record amplicon length when a valid fwd+rev pair was found
                 if let Some(ref info) = seq_result.amplicon_info {
-                    if info.found {
+                    if info.found && info.size > 0 {
                         entry.amplicon_lengths.push(info.size);
                     }
                 }
@@ -951,6 +1040,25 @@ fn run_analysis(
         sequences_with_valid_amplicon.load(Ordering::SeqCst);
     let final_sequences_failed_amplicon = sequences_failed_amplicon.load(Ordering::SeqCst);
 
+    let final_fwd_mm_dist = MismatchDistribution {
+        zero_mm: fwd_mm_zero.load(Ordering::SeqCst),
+        one_mm: fwd_mm_one.load(Ordering::SeqCst),
+        more_mm: fwd_mm_more.load(Ordering::SeqCst),
+        no_match: fwd_mm_none.load(Ordering::SeqCst),
+    };
+    let final_rev_mm_dist = MismatchDistribution {
+        zero_mm: rev_mm_zero.load(Ordering::SeqCst),
+        one_mm: rev_mm_one.load(Ordering::SeqCst),
+        more_mm: rev_mm_more.load(Ordering::SeqCst),
+        no_match: rev_mm_none.load(Ordering::SeqCst),
+    };
+    let final_probe_mm_dist = MismatchDistribution {
+        zero_mm: probe_mm_zero.load(Ordering::SeqCst),
+        one_mm: probe_mm_one.load(Ordering::SeqCst),
+        more_mm: probe_mm_more.load(Ordering::SeqCst),
+        no_match: probe_mm_none.load(Ordering::SeqCst),
+    };
+
     let output_text = generate_output_text(
         fwd_primers,
         rev_primers,
@@ -961,6 +1069,9 @@ fn run_analysis(
         final_sequences_with_min_matches,
         final_sequences_with_valid_amplicon,
         final_sequences_failed_amplicon,
+        &final_fwd_mm_dist,
+        &final_rev_mm_dist,
+        &final_probe_mm_dist,
         settings,
     );
 
@@ -971,6 +1082,9 @@ fn run_analysis(
         sequences_with_min_matches: final_sequences_with_min_matches,
         sequences_with_valid_amplicon: final_sequences_with_valid_amplicon,
         sequences_failed_amplicon: final_sequences_failed_amplicon,
+        fwd_mm_dist: final_fwd_mm_dist,
+        rev_mm_dist: final_rev_mm_dist,
+        probe_mm_dist: final_probe_mm_dist,
         output_text,
     }
 }
@@ -986,6 +1100,9 @@ fn generate_output_text(
     sequences_with_min_matches: usize,
     sequences_with_valid_amplicon: usize,
     sequences_failed_amplicon: usize,
+    fwd_mm_dist: &MismatchDistribution,
+    rev_mm_dist: &MismatchDistribution,
+    probe_mm_dist: &MismatchDistribution,
     settings: &AlignmentSettings,
 ) -> String {
     let mut out = Vec::new();
@@ -1017,8 +1134,8 @@ fn generate_output_text(
     out.push(String::new());
 
     out.push(format!(
-        "Analysis settings: Min fwd matched = {}, Min rev matched = {}, Min probes matched = {}, Min coverage = {}",
-        settings.min_fwd_matched, settings.min_rev_matched, settings.min_probe_matched, settings.min_coverage
+        "Analysis settings: Min fwd matched = {}, Min rev matched = {}, Min probes matched = {}, Min coverage = {}, Max mismatches/oligo = {}",
+        settings.min_fwd_matched, settings.min_rev_matched, settings.min_probe_matched, settings.min_coverage, settings.max_mismatches_per_oligo
     ));
     if settings.min_amplicon_size.is_some() || settings.max_amplicon_size.is_some() {
         match (settings.min_amplicon_size, settings.max_amplicon_size) {
@@ -1178,6 +1295,39 @@ fn generate_output_text(
         };
         out.push(format!("(Amplicon size constraint: {})", constraint_desc));
     }
+
+    // Mismatch distribution per category
+    out.push(String::new());
+    out.push("MISMATCH DISTRIBUTION (best oligo per category per sequence):".to_string());
+    out.push("-".repeat(50));
+
+    let fmt_pct = |count: usize| -> String {
+        if total_sequences > 0 {
+            format!("{} ({:.1}%)", count, count as f64 / total_sequences as f64 * 100.0)
+        } else {
+            format!("{}", count)
+        }
+    };
+
+    out.push(format!("  Forward Primers:"));
+    out.push(format!("    0 mismatches: {}", fmt_pct(fwd_mm_dist.zero_mm)));
+    out.push(format!("    1 mismatch:   {}", fmt_pct(fwd_mm_dist.one_mm)));
+    out.push(format!("    >1 mismatches: {}", fmt_pct(fwd_mm_dist.more_mm)));
+    out.push(format!("    No match:     {}", fmt_pct(fwd_mm_dist.no_match)));
+
+    if !probes.is_empty() {
+        out.push(format!("  Probes:"));
+        out.push(format!("    0 mismatches: {}", fmt_pct(probe_mm_dist.zero_mm)));
+        out.push(format!("    1 mismatch:   {}", fmt_pct(probe_mm_dist.one_mm)));
+        out.push(format!("    >1 mismatches: {}", fmt_pct(probe_mm_dist.more_mm)));
+        out.push(format!("    No match:     {}", fmt_pct(probe_mm_dist.no_match)));
+    }
+
+    out.push(format!("  Reverse Primers:"));
+    out.push(format!("    0 mismatches: {}", fmt_pct(rev_mm_dist.zero_mm)));
+    out.push(format!("    1 mismatch:   {}", fmt_pct(rev_mm_dist.one_mm)));
+    out.push(format!("    >1 mismatches: {}", fmt_pct(rev_mm_dist.more_mm)));
+    out.push(format!("    No match:     {}", fmt_pct(rev_mm_dist.no_match)));
 
     out.push(String::new());
     out.push("LEGEND:".to_string());
@@ -1685,11 +1835,12 @@ impl PrimerAlignApp {
                 row,
                 0,
                 &format!(
-                    "Settings: Min fwd = {}, Min rev = {}, Min probes = {}, Min coverage = {}",
+                    "Settings: Min fwd = {}, Min rev = {}, Min probes = {}, Min coverage = {}, Max mm/oligo = {}",
                     self.settings.min_fwd_matched,
                     self.settings.min_rev_matched,
                     self.settings.min_probe_matched,
-                    self.settings.min_coverage
+                    self.settings.min_coverage,
+                    self.settings.max_mismatches_per_oligo
                 ),
             )
             .map_err(|e| e.to_string())?;
@@ -1931,24 +2082,26 @@ impl PrimerAlignApp {
                 .map_err(|e| e.to_string())?;
             col += 1;
 
-            // Amplicon Length
-            let amplicon_length = if !data.amplicon_lengths.is_empty() {
+            // Amplicon Length - show most common length, or empty if none found
+            if !data.amplicon_lengths.is_empty() {
                 use std::collections::HashMap;
                 let mut length_counts: HashMap<usize, usize> = HashMap::new();
                 for &len in &data.amplicon_lengths {
                     *length_counts.entry(len).or_insert(0) += 1;
                 }
-                length_counts
+                let amplicon_length = length_counts
                     .iter()
                     .max_by_key(|(_, &count)| count)
                     .map(|(&len, _)| len)
-                    .unwrap_or(0)
+                    .unwrap_or(0);
+                worksheet
+                    .write_number(row, col, amplicon_length as f64)
+                    .map_err(|e| e.to_string())?;
             } else {
-                0
-            };
-            worksheet
-                .write_number(row, col, amplicon_length as f64)
-                .map_err(|e| e.to_string())?;
+                worksheet
+                    .write_string(row, col, "")
+                    .map_err(|e| e.to_string())?;
+            }
             col += 1;
 
             // Examples
@@ -2134,6 +2287,70 @@ impl PrimerAlignApp {
                 ),
             )
             .map_err(|e| e.to_string())?;
+
+        // Mismatch distribution per category
+        row += 2;
+        worksheet
+            .write_string_with_format(
+                row,
+                0,
+                "MISMATCH DISTRIBUTION (best oligo per category per sequence):",
+                &header_format,
+            )
+            .map_err(|e| e.to_string())?;
+        row += 1;
+
+        let fmt_pct_xl = |count: usize| -> String {
+            if results.total_sequences > 0 {
+                format!(
+                    "{} ({:.1}%)",
+                    count,
+                    count as f64 / results.total_sequences as f64 * 100.0
+                )
+            } else {
+                format!("{}", count)
+            }
+        };
+
+        worksheet
+            .write_string_with_format(row, 0, "Forward Primers:", &category_format)
+            .map_err(|e| e.to_string())?;
+        row += 1;
+        worksheet.write_string(row, 0, &format!("  0 mismatches: {}", fmt_pct_xl(results.fwd_mm_dist.zero_mm))).map_err(|e| e.to_string())?;
+        row += 1;
+        worksheet.write_string(row, 0, &format!("  1 mismatch: {}", fmt_pct_xl(results.fwd_mm_dist.one_mm))).map_err(|e| e.to_string())?;
+        row += 1;
+        worksheet.write_string(row, 0, &format!("  >1 mismatches: {}", fmt_pct_xl(results.fwd_mm_dist.more_mm))).map_err(|e| e.to_string())?;
+        row += 1;
+        worksheet.write_string(row, 0, &format!("  No match: {}", fmt_pct_xl(results.fwd_mm_dist.no_match))).map_err(|e| e.to_string())?;
+        row += 1;
+
+        if !self.probes.is_empty() {
+            worksheet
+                .write_string_with_format(row, 0, "Probes:", &category_format)
+                .map_err(|e| e.to_string())?;
+            row += 1;
+            worksheet.write_string(row, 0, &format!("  0 mismatches: {}", fmt_pct_xl(results.probe_mm_dist.zero_mm))).map_err(|e| e.to_string())?;
+            row += 1;
+            worksheet.write_string(row, 0, &format!("  1 mismatch: {}", fmt_pct_xl(results.probe_mm_dist.one_mm))).map_err(|e| e.to_string())?;
+            row += 1;
+            worksheet.write_string(row, 0, &format!("  >1 mismatches: {}", fmt_pct_xl(results.probe_mm_dist.more_mm))).map_err(|e| e.to_string())?;
+            row += 1;
+            worksheet.write_string(row, 0, &format!("  No match: {}", fmt_pct_xl(results.probe_mm_dist.no_match))).map_err(|e| e.to_string())?;
+            row += 1;
+        }
+
+        worksheet
+            .write_string_with_format(row, 0, "Reverse Primers:", &category_format)
+            .map_err(|e| e.to_string())?;
+        row += 1;
+        worksheet.write_string(row, 0, &format!("  0 mismatches: {}", fmt_pct_xl(results.rev_mm_dist.zero_mm))).map_err(|e| e.to_string())?;
+        row += 1;
+        worksheet.write_string(row, 0, &format!("  1 mismatch: {}", fmt_pct_xl(results.rev_mm_dist.one_mm))).map_err(|e| e.to_string())?;
+        row += 1;
+        worksheet.write_string(row, 0, &format!("  >1 mismatches: {}", fmt_pct_xl(results.rev_mm_dist.more_mm))).map_err(|e| e.to_string())?;
+        row += 1;
+        worksheet.write_string(row, 0, &format!("  No match: {}", fmt_pct_xl(results.rev_mm_dist.no_match))).map_err(|e| e.to_string())?;
 
         workbook.save(path).map_err(|e| e.to_string())?;
 
@@ -2410,6 +2627,15 @@ impl eframe::App for PrimerAlignApp {
 
                         ui.add_space(20.0);
 
+                        ui.label("Max Mismatches/Oligo:");
+                        ui.add(
+                            egui::DragValue::new(&mut self.settings.max_mismatches_per_oligo)
+                                .range(0..=50)
+                                .speed(0.1),
+                        );
+
+                        ui.add_space(20.0);
+
                         ui.label("Ambiguity Match Display:");
                         egui::ComboBox::from_id_salt("ambiguity_display")
                             .selected_text(match self.settings.ambiguity_display {
@@ -2625,6 +2851,14 @@ impl eframe::App for PrimerAlignApp {
                                     .range(0.0..=1.0)
                                     .speed(0.01)
                                     .max_decimals(2),
+                            );
+                            ui.end_row();
+
+                            ui.label("Max Mismatches per Oligo:");
+                            ui.add(
+                                egui::DragValue::new(&mut self.settings.max_mismatches_per_oligo)
+                                    .range(0..=50)
+                                    .speed(0.1),
                             );
                             ui.end_row();
 
