@@ -228,6 +228,12 @@ struct AnalysisResults {
     fwd_mm_dist: MismatchDistribution,
     rev_mm_dist: MismatchDistribution,
     probe_mm_dist: MismatchDistribution,
+    /// Overall pattern: all active categories have best oligo with 0 mismatches
+    overall_all_perfect: usize,
+    /// Overall pattern: worst category has exactly 1 mismatch (all ≤1mm but not all 0)
+    overall_max_one_mm: usize,
+    /// Overall pattern: at least one category has ≥2 mismatches or no match
+    overall_two_plus_mm: usize,
     output_text: String,
 }
 
@@ -911,6 +917,11 @@ fn run_analysis(
     let probe_mm_more = Arc::new(AtomicUsize::new(0));
     let probe_mm_none = Arc::new(AtomicUsize::new(0));
 
+    // Overall pattern counters
+    let overall_all_perfect = Arc::new(AtomicUsize::new(0));
+    let overall_max_one_mm = Arc::new(AtomicUsize::new(0));
+    let overall_two_plus_mm = Arc::new(AtomicUsize::new(0));
+
     let processed = Arc::new(AtomicUsize::new(0));
 
     sequences.par_iter().for_each(|record| {
@@ -948,6 +959,29 @@ fn run_analysis(
                 Some(1) => { probe_mm_one.fetch_add(1, Ordering::SeqCst); }
                 Some(_) => { probe_mm_more.fetch_add(1, Ordering::SeqCst); }
                 None => { probe_mm_none.fetch_add(1, Ordering::SeqCst); }
+            }
+        }
+
+        // Overall pattern: worst best-per-category across all active categories
+        {
+            let mut category_bests: Vec<Option<usize>> = vec![
+                seq_result.best_fwd_mm,
+                seq_result.best_rev_mm,
+            ];
+            if !probes.is_empty() {
+                category_bests.push(seq_result.best_probe_mm);
+            }
+
+            if category_bests.iter().any(|b| b.is_none()) {
+                // At least one category has no match at all
+                overall_two_plus_mm.fetch_add(1, Ordering::SeqCst);
+            } else {
+                let worst_best = category_bests.iter().filter_map(|b| *b).max().unwrap_or(0);
+                match worst_best {
+                    0 => { overall_all_perfect.fetch_add(1, Ordering::SeqCst); }
+                    1 => { overall_max_one_mm.fetch_add(1, Ordering::SeqCst); }
+                    _ => { overall_two_plus_mm.fetch_add(1, Ordering::SeqCst); }
+                }
             }
         }
 
@@ -1059,6 +1093,10 @@ fn run_analysis(
         no_match: probe_mm_none.load(Ordering::SeqCst),
     };
 
+    let final_overall_all_perfect = overall_all_perfect.load(Ordering::SeqCst);
+    let final_overall_max_one_mm = overall_max_one_mm.load(Ordering::SeqCst);
+    let final_overall_two_plus_mm = overall_two_plus_mm.load(Ordering::SeqCst);
+
     let output_text = generate_output_text(
         fwd_primers,
         rev_primers,
@@ -1072,6 +1110,9 @@ fn run_analysis(
         &final_fwd_mm_dist,
         &final_rev_mm_dist,
         &final_probe_mm_dist,
+        final_overall_all_perfect,
+        final_overall_max_one_mm,
+        final_overall_two_plus_mm,
         settings,
     );
 
@@ -1085,6 +1126,9 @@ fn run_analysis(
         fwd_mm_dist: final_fwd_mm_dist,
         rev_mm_dist: final_rev_mm_dist,
         probe_mm_dist: final_probe_mm_dist,
+        overall_all_perfect: final_overall_all_perfect,
+        overall_max_one_mm: final_overall_max_one_mm,
+        overall_two_plus_mm: final_overall_two_plus_mm,
         output_text,
     }
 }
@@ -1103,6 +1147,9 @@ fn generate_output_text(
     fwd_mm_dist: &MismatchDistribution,
     rev_mm_dist: &MismatchDistribution,
     probe_mm_dist: &MismatchDistribution,
+    overall_all_perfect: usize,
+    overall_max_one_mm: usize,
+    overall_two_plus_mm: usize,
     settings: &AlignmentSettings,
 ) -> String {
     let mut out = Vec::new();
@@ -1328,6 +1375,12 @@ fn generate_output_text(
     out.push(format!("    1 mismatch:   {}", fmt_pct(rev_mm_dist.one_mm)));
     out.push(format!("    >1 mismatches: {}", fmt_pct(rev_mm_dist.more_mm)));
     out.push(format!("    No match:     {}", fmt_pct(rev_mm_dist.no_match)));
+
+    out.push(String::new());
+    out.push(format!("  Overall Pattern (worst best-match across all categories):"));
+    out.push(format!("    All categories 0 mismatches:  {}", fmt_pct(overall_all_perfect)));
+    out.push(format!("    All categories ≤1 mismatch:   {}", fmt_pct(overall_max_one_mm)));
+    out.push(format!("    ≥2 mismatches in any category: {}", fmt_pct(overall_two_plus_mm)));
 
     out.push(String::new());
     out.push("LEGEND:".to_string());
@@ -2351,6 +2404,19 @@ impl PrimerAlignApp {
         worksheet.write_string(row, 0, &format!("  >1 mismatches: {}", fmt_pct_xl(results.rev_mm_dist.more_mm))).map_err(|e| e.to_string())?;
         row += 1;
         worksheet.write_string(row, 0, &format!("  No match: {}", fmt_pct_xl(results.rev_mm_dist.no_match))).map_err(|e| e.to_string())?;
+        row += 1;
+
+        // Overall pattern distribution
+        row += 1;
+        worksheet
+            .write_string_with_format(row, 0, "Overall Pattern (worst best-match across all categories):", &category_format)
+            .map_err(|e| e.to_string())?;
+        row += 1;
+        worksheet.write_string(row, 0, &format!("  All categories 0 mismatches: {}", fmt_pct_xl(results.overall_all_perfect))).map_err(|e| e.to_string())?;
+        row += 1;
+        worksheet.write_string(row, 0, &format!("  All categories ≤1 mismatch: {}", fmt_pct_xl(results.overall_max_one_mm))).map_err(|e| e.to_string())?;
+        row += 1;
+        worksheet.write_string(row, 0, &format!("  ≥2 mismatches in any category: {}", fmt_pct_xl(results.overall_two_plus_mm))).map_err(|e| e.to_string())?;
 
         workbook.save(path).map_err(|e| e.to_string())?;
 
