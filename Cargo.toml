@@ -2,7 +2,7 @@
 name = "primer_align"
 version = "2.0.0"
 edition = "2021"
-description = "qPCR Primer/Probe Inclusivity Analysis Tool - Categorized primer & probe analysis with amplicon detection"
+description = "qPCR Oligo Inclusivity Tool - Categorized oligo analysis with amplicon detection"
 license = "MIT"
 
 [dependencies]

@@ -1,4 +1,4 @@
-//! qPCR Primer Inclusivity Analysis Tool v2.0
+//! qPCR Oligo Inclusivity Tool v2.0
 //! A fast Rust implementation with eframe GUI
 //!
 //! This tool evaluates primer/probe inclusivity in large sets of reference sequences
@@ -1155,7 +1155,7 @@ fn generate_output_text(
     let mut out = Vec::new();
 
     out.push("=".repeat(80));
-    out.push("qPCR PRIMER/PROBE INCLUSIVITY ANALYSIS RESULTS".to_string());
+    out.push("qPCR OLIGO INCLUSIVITY ANALYSIS RESULTS".to_string());
     out.push("=".repeat(80));
     out.push(String::new());
 
@@ -1876,7 +1876,7 @@ impl PrimerAlignApp {
             .write_string_with_format(
                 row,
                 0,
-                "qPCR Primer/Probe Inclusivity Analysis Results",
+                "qPCR Oligo Inclusivity Analysis Results",
                 &title_format,
             )
             .map_err(|e| e.to_string())?;
@@ -2491,8 +2491,8 @@ impl eframe::App for PrimerAlignApp {
         // Main content
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
-                ui.heading("qPCR Primer/Probe Inclusivity Tool");
-                ui.label("Categorized primer & probe analysis with amplicon detection");
+                ui.heading("qPCR Oligo Inclusivity Tool");
+                ui.label("Categorized oligo analysis with amplicon detection");
                 ui.add_space(10.0);
 
                 // File selection group
@@ -3094,10 +3094,10 @@ impl eframe::App for PrimerAlignApp {
                 .collapsible(false)
                 .resizable(false)
                 .show(ctx, |ui| {
-                    ui.heading("qPCR Primer/Probe Inclusivity Tool");
+                    ui.heading("qPCR Oligo Inclusivity Tool");
                     ui.label("Version 2.0.0");
                     ui.add_space(10.0);
-                    ui.label("A high-performance primer/probe inclusivity analysis tool");
+                    ui.label("A high-performance oligo inclusivity analysis tool");
                     ui.label("built with Rust and rust-bio.");
                     ui.add_space(10.0);
                     ui.label("Features:");
@@ -3131,7 +3131,7 @@ fn main() -> eframe::Result<()> {
     };
 
     eframe::run_native(
-        "qPCR Primer/Probe Inclusivity Tool v2.0",
+        "qPCR Oligo Inclusivity Tool v2.0",
         options,
         Box::new(|cc| Ok(Box::new(PrimerAlignApp::new(cc)))),
     )
