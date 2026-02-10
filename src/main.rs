@@ -232,8 +232,10 @@ struct AnalysisResults {
     overall_all_perfect: usize,
     /// Overall pattern: worst category has exactly 1 mismatch (all ≤1mm but not all 0)
     overall_max_one_mm: usize,
-    /// Overall pattern: at least one category has ≥2 mismatches or no match
+    /// Overall pattern: at least one category has ≥2 mismatches
     overall_two_plus_mm: usize,
+    /// Overall pattern: at least one category has no match at all
+    overall_no_match: usize,
     output_text: String,
 }
 
@@ -921,6 +923,7 @@ fn run_analysis(
     let overall_all_perfect = Arc::new(AtomicUsize::new(0));
     let overall_max_one_mm = Arc::new(AtomicUsize::new(0));
     let overall_two_plus_mm = Arc::new(AtomicUsize::new(0));
+    let overall_no_match = Arc::new(AtomicUsize::new(0));
 
     let processed = Arc::new(AtomicUsize::new(0));
 
@@ -974,7 +977,7 @@ fn run_analysis(
 
             if category_bests.iter().any(|b| b.is_none()) {
                 // At least one category has no match at all
-                overall_two_plus_mm.fetch_add(1, Ordering::SeqCst);
+                overall_no_match.fetch_add(1, Ordering::SeqCst);
             } else {
                 let worst_best = category_bests.iter().filter_map(|b| *b).max().unwrap_or(0);
                 match worst_best {
@@ -1096,6 +1099,7 @@ fn run_analysis(
     let final_overall_all_perfect = overall_all_perfect.load(Ordering::SeqCst);
     let final_overall_max_one_mm = overall_max_one_mm.load(Ordering::SeqCst);
     let final_overall_two_plus_mm = overall_two_plus_mm.load(Ordering::SeqCst);
+    let final_overall_no_match = overall_no_match.load(Ordering::SeqCst);
 
     let output_text = generate_output_text(
         fwd_primers,
@@ -1113,6 +1117,7 @@ fn run_analysis(
         final_overall_all_perfect,
         final_overall_max_one_mm,
         final_overall_two_plus_mm,
+        final_overall_no_match,
         settings,
     );
 
@@ -1129,6 +1134,7 @@ fn run_analysis(
         overall_all_perfect: final_overall_all_perfect,
         overall_max_one_mm: final_overall_max_one_mm,
         overall_two_plus_mm: final_overall_two_plus_mm,
+        overall_no_match: final_overall_no_match,
         output_text,
     }
 }
@@ -1150,6 +1156,7 @@ fn generate_output_text(
     overall_all_perfect: usize,
     overall_max_one_mm: usize,
     overall_two_plus_mm: usize,
+    overall_no_match: usize,
     settings: &AlignmentSettings,
 ) -> String {
     let mut out = Vec::new();
@@ -1381,6 +1388,7 @@ fn generate_output_text(
     out.push(format!("    All categories 0 mismatches:  {}", fmt_pct(overall_all_perfect)));
     out.push(format!("    All categories ≤1 mismatch:   {}", fmt_pct(overall_max_one_mm)));
     out.push(format!("    ≥2 mismatches in any category: {}", fmt_pct(overall_two_plus_mm)));
+    out.push(format!("    No match in any category:     {}", fmt_pct(overall_no_match)));
 
     out.push(String::new());
     out.push("LEGEND:".to_string());
@@ -2417,6 +2425,8 @@ impl PrimerAlignApp {
         worksheet.write_string(row, 0, &format!("  All categories ≤1 mismatch: {}", fmt_pct_xl(results.overall_max_one_mm))).map_err(|e| e.to_string())?;
         row += 1;
         worksheet.write_string(row, 0, &format!("  ≥2 mismatches in any category: {}", fmt_pct_xl(results.overall_two_plus_mm))).map_err(|e| e.to_string())?;
+        row += 1;
+        worksheet.write_string(row, 0, &format!("  No match in any category: {}", fmt_pct_xl(results.overall_no_match))).map_err(|e| e.to_string())?;
 
         workbook.save(path).map_err(|e| e.to_string())?;
 
