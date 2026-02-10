@@ -2,3 +2,4 @@ target/
 CLAUDE.md
 refactor_instructions.md
 old_files/
+.claude/
