@@ -824,19 +824,15 @@ fn analyze_sequence(
     let rev_matched = rev_results.values().filter(|r| r.matched).count();
     let probe_matched = probe_results.values().filter(|r| r.matched).count();
 
-    // Total mismatches
-    let total_mismatches: usize = fwd_results
-        .values()
-        .chain(rev_results.values())
-        .chain(probe_results.values())
-        .filter(|r| r.matched)
-        .map(|r| r.mismatches)
-        .sum();
-
     // Best (minimum) mismatch count per category
     let best_fwd_mm = fwd_results.values().filter(|r| r.matched).map(|r| r.mismatches).min();
     let best_rev_mm = rev_results.values().filter(|r| r.matched).map(|r| r.mismatches).min();
     let best_probe_mm = probe_results.values().filter(|r| r.matched).map(|r| r.mismatches).min();
+
+    // Total mismatches: sum of per-category minimums (best oligo per category)
+    let total_mismatches: usize = best_fwd_mm.unwrap_or(0)
+        + best_rev_mm.unwrap_or(0)
+        + best_probe_mm.unwrap_or(0);
 
     SequenceResult {
         fwd_results,
